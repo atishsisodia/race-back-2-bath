@@ -166,9 +166,14 @@ class Tracker:
         events = []
         if ids:
             # Route history, fetched incrementally with a small overlap
+            # Every 5 minutes re-read the whole race window, so positions a phone
+            # buffered while out of signal and sent late are still picked up.
             frm = self.window_start(now)
-            if self.last_fetch_to:
+            full = time.time() - getattr(self, "last_full", 0) > 300
+            if self.last_fetch_to and not full:
                 frm = max(frm, self.last_fetch_to - timedelta(minutes=10))
+            if full:
+                self.last_full = time.time()
             route = self.api.get("/api/reports/route", {
                 "deviceId": ids, "from": iso(frm), "to": iso(now)}) or []
             for p in route:
@@ -242,7 +247,15 @@ class Tracker:
             if status not in ("withdrawn", "dnf"):
                 status = "finished" if finish else ("racing" if cur else "waiting")
 
+            # "Last heard from": the newer of the last position fix and the last time
+            # Traccar heard from the phone at all. A phone sitting still may keep
+            # reporting without Traccar storing new positions (duplicate filtering).
             last_seen = parse_time(cur["fixTime"]) if cur else None
+            heard = parse_time(d.get("lastUpdate")) if d.get("lastUpdate") else None
+            if heard and cur:
+                heard = min(heard, cutoff)   # respect the privacy delay
+                if last_seen is None or heard > last_seen:
+                    last_seen = heard
             pair = {
                 "id": did,
                 "name": d.get("name") or d.get("uniqueId"),
