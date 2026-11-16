@@ -1,0 +1,16 @@
+[Unit]
+Description=Race Back 2 Bath spectator site
+After=network-online.target traccar.service
+Wants=network-online.target
+
+[Service]
+WorkingDirectory=/opt/race-back-2-bath
+EnvironmentFile=/opt/race-back-2-bath/config.env
+ExecStart=/usr/bin/python3 /opt/race-back-2-bath/server.py
+Restart=always
+RestartSec=5
+User=nobody
+Group=nogroup
+
+[Install]
+WantedBy=multi-user.target
