@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Race Back 2 Bath – Live</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="">
+<style>
+  :root {
+    --ink: #13202b; --muted: #5d6b78; --line: #e3e7eb; --bg: #f6f7f8;
+    --card: #fff; --accent: #0b6e4f; --warn: #b85c00; --gold: #c99a06;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; color: var(--ink); background: var(--bg); }
+  header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 18px; background: var(--ink); color: #fff; }
+  header h1 { margin: 0; font-size: 1.15rem; letter-spacing: .02em; }
+  header h1 span { color: #7fd6b5; }
+  #clock { font-size: .85rem; opacity: .85; text-align: right; }
+  main { display: grid; grid-template-columns: 1fr 420px; height: calc(100% - 52px); }
+  #map { height: 100%; }
+  aside { overflow-y: auto; background: var(--card); border-left: 1px solid var(--line); }
+  .tabs { display: flex; position: sticky; top: 0; background: var(--card); border-bottom: 1px solid var(--line); z-index: 2; }
+  .tabs button { flex: 1; padding: 12px; border: 0; background: none; font: inherit; font-weight: 600; color: var(--muted); cursor: pointer; border-bottom: 3px solid transparent; }
+  .tabs button.on { color: var(--ink); border-bottom-color: var(--accent); }
+  .note { margin: 10px 14px; padding: 8px 10px; font-size: .8rem; color: var(--muted); background: var(--bg); border-radius: 6px; }
+  .note.warn { color: var(--warn); background: #fff4e8; }
+  table { width: 100%; border-collapse: collapse; font-size: .88rem; }
+  th { text-align: left; font-size: .72rem; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); padding: 8px 10px; border-bottom: 1px solid var(--line); }
+  td { padding: 9px 10px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  tr.row { cursor: pointer; }
+  tr.row:hover { background: #f1f6f4; }
+  .pos { width: 34px; font-weight: 700; color: var(--muted); }
+  .pos.p1 { color: var(--gold); }
+  .dot { display: inline-block; width: 11px; height: 11px; border-radius: 50%; margin-right: 7px; vertical-align: -1px; border: 2px solid #fff; box-shadow: 0 0 0 1px rgba(0,0,0,.25); }
+  .sub { display: block; font-size: .75rem; color: var(--muted); margin-left: 18px; }
+  .stale { color: var(--warn); }
+  .badge { font-size: .7rem; font-weight: 700; padding: 2px 6px; border-radius: 4px; background: #e6f3ee; color: var(--accent); }
+  .badge.out { background: #eee; color: var(--muted); }
+  h2 { font-size: .8rem; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 16px 14px 4px; }
+  .empty { padding: 18px 14px; color: var(--muted); font-size: .9rem; }
+  .label { background: var(--ink); color: #fff; border: 0; border-radius: 4px; padding: 2px 6px; font-weight: 600; font-size: .75rem; box-shadow: none; }
+  .label::before { display: none; }
+  .flag { transform: translate(-50%, -150%); white-space: nowrap; background: var(--accent); color: #fff; font-weight: 700; font-size: .75rem; padding: 3px 7px; border-radius: 4px; }
+  @media (max-width: 860px) {
+    main { grid-template-columns: 1fr; grid-template-rows: 55vh auto; height: auto; }
+    aside { border-left: 0; border-top: 1px solid var(--line); overflow: visible; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1 id="title">Race Back <span>2</span> Bath</h1>
+  <div id="clock">Connecting…</div>
+</header>
+<main>
+  <div id="map"></div>
+  <aside>
+    <div class="tabs">
+      <button class="on" data-tab="live">Live standings</button>
+      <button data-tab="results">Results</button>
+    </div>
+    <div id="notes"></div>
+    <div id="live"></div>
+    <div id="results" hidden></div>
+  </aside>
+</main>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
+<script>
+const COLOURS = ["#e6194b","#3cb44b","#4363d8","#f58231","#911eb4","#46a0a0","#d6339c","#9a6324",
+                 "#808000","#000075","#e0a800","#008080","#800000","#5b5bd6","#2f8f2f","#c2185b"];
+const colour = id => COLOURS[id % COLOURS.length];
+const TZ = "Europe/London";
+
+const map = L.map("map", { zoomControl: true }).setView([51.3782, -2.3264], 9);
+L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+  maxZoom: 18, attribution: "&copy; OpenStreetMap contributors"
+}).addTo(map);
+
+const layers = {};          // id -> {marker, trail}
+let finishLayer = null, startLayer = null, fitted = false, latest = null;
+
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const fmtTime = s => s ? new Date(s).toLocaleTimeString("en-GB", { timeZone: TZ, hour: "2-digit", minute: "2-digit" }) : "–";
+const fmtDur = sec => {
+  if (sec == null) return "–";
+  const h = Math.floor(sec / 3600), m = Math.floor(sec % 3600 / 60), s = sec % 60;
+  return `${h}:${String(m).padStart(2,"0")}:${String(s).padStart(2,"0")}`;
+};
+const ago = s => {
+  if (!s) return "no signal yet";
+  // measured against the (possibly delayed) "as of" time so a privacy delay doesn't look like signal loss
+  const ref = latest && latest.asOf ? new Date(latest.asOf).getTime() + (Date.now() - new Date(latest.generated).getTime()) : Date.now();
+  const m = Math.max(0, Math.round((ref - new Date(s)) / 60000));
+  return m < 1 ? "just now" : m < 60 ? `${m} min ago` : `${Math.floor(m/60)}h ${m%60}m ago`;
+};
+
+function drawArea(area, style) {
+  if (!area) return null;
+  if (area.type === "circle") return L.circle([area.lat, area.lng], { radius: area.radius, ...style });
+  return L.polygon(area.points, style);
+}
+
+function render(d) {
+  latest = d;
+  document.getElementById("title").innerHTML = esc(d.race).replace(/ 2 /, " <span>2</span> ");
+  document.getElementById("clock").textContent = d.ready
+    ? `Updated ${fmtTime(d.generated)}${d.delayMinutes ? ` · positions delayed ${d.delayMinutes} min` : ""}`
+    : "Waiting for tracking data…";
+  if (!d.ready) return;
+
+  // notes
+  const notes = [];
+  if (d.raceStart) notes.push(`<div class="note">Race start: ${new Date(d.raceStart).toLocaleString("en-GB",{timeZone:TZ, weekday:"short", day:"numeric", month:"short", hour:"2-digit", minute:"2-digit"})}</div>`);
+  for (const w of d.warnings || []) notes.push(`<div class="note warn">${esc(w)}</div>`);
+  document.getElementById("notes").innerHTML = notes.join("");
+
+  // finish / start areas
+  if (!finishLayer) {
+    finishLayer = (drawArea(d.finish.area, { color: "#0b6e4f", weight: 2, fillOpacity: .15 })
+      || L.circleMarker([d.finish.lat, d.finish.lng], { radius: 9, color: "#0b6e4f", fillOpacity: .8 }))
+      .bindTooltip("Finish – University of Bath", { permanent: false }).addTo(map);
+    L.marker([d.finish.lat, d.finish.lng], { icon: L.divIcon({ className: "", iconSize: null,
+      html: `<div class="flag">🏁 Campus</div>` }), interactive: false, zIndexOffset: -1000 }).addTo(map);
+    startLayer = drawArea(d.startArea, { color: "#555", weight: 1, dashArray: "4 4", fillOpacity: .05 });
+    if (startLayer) startLayer.bindTooltip("Drop-off").addTo(map);
+  }
+
+  // markers + trails
+  const seen = new Set();
+  const bounds = [[d.finish.lat, d.finish.lng]];
+  for (const p of d.pairs) {
+    seen.add(p.id);
+    const c = colour(p.id);
+    let l = layers[p.id];
+    if (!l) {
+      l = layers[p.id] = {
+        trail: L.polyline([], { color: c, weight: 3, opacity: .7 }).addTo(map),
+        marker: L.circleMarker([0,0], { radius: 8, color: "#fff", weight: 2, fillColor: c, fillOpacity: 1 })
+                  .bindTooltip("", { permanent: true, direction: "right", offset: [8,0], className: "label" })
+      };
+    }
+    l.trail.setLatLngs(p.trail);
+    if (p.lat != null) {
+      const done = p.status !== "racing" && p.status !== "waiting";
+      if (l.done !== done) {   // finished pairs: smaller, label on hover only
+        l.marker.unbindTooltip().bindTooltip(esc(p.name), { permanent: !done, direction: "right", offset: [8,0], className: "label" });
+        l.marker.setRadius(done ? 5 : 8);
+        l.done = done;
+      }
+      l.marker.setLatLng([p.lat, p.lng]).setTooltipContent(esc(p.name));
+      l.marker.setStyle({ fillOpacity: p.stale ? .45 : 1 });
+      if (!map.hasLayer(l.marker)) l.marker.addTo(map);
+      bounds.push([p.lat, p.lng]);
+    }
+  }
+  for (const id in layers) if (!seen.has(+id)) { map.removeLayer(layers[id].marker); map.removeLayer(layers[id].trail); delete layers[id]; }
+  if (!fitted && bounds.length > 1) { map.fitBounds(bounds, { padding: [40, 40], maxZoom: 12 }); fitted = true; }
+
+  // live standings: finished first by time, then racing by distance to go
+  const finished = d.pairs.filter(p => p.status === "finished")
+    .sort((a, b) => (a.elapsedSeconds ?? 1e12) - (b.elapsedSeconds ?? 1e12) || a.finish.localeCompare(b.finish));
+  const racing = d.pairs.filter(p => p.status === "racing" || p.status === "waiting")
+    .sort((a, b) => (a.milesToGo ?? 1e9) - (b.milesToGo ?? 1e9));
+  const out = d.pairs.filter(p => p.status === "withdrawn" || p.status === "dnf");
+
+  let html = "";
+  if (!d.pairs.length) html = `<div class="empty">No pairs yet. They'll appear here once their trackers are switched on.</div>`;
+  else {
+    html += `<table><thead><tr><th></th><th>Pair</th><th class="num">To go</th></tr></thead><tbody>`;
+    let pos = 0;
+    for (const p of finished) html += row(++pos, p, `<span class="badge">FINISHED</span><span class="sub" style="margin:0">${fmtDur(p.elapsedSeconds)}</span>`);
+    for (const p of racing) html += row(++pos, p, p.milesToGo != null ? `${p.milesToGo.toFixed(1)} mi` : "–");
+    for (const p of out) html += row("", p, `<span class="badge out">${p.status.toUpperCase()}</span>`);
+    html += `</tbody></table>`;
+  }
+  document.getElementById("live").innerHTML = html;
+
+  // results
+  let r = "";
+  if (!finished.length) r += `<div class="empty">Nobody has reached campus yet.</div>`;
+  else {
+    r += `<table><thead><tr><th></th><th>Pair</th><th class="num">Start</th><th class="num">Finish</th><th class="num">Time</th></tr></thead><tbody>`;
+    finished.forEach((p, i) => {
+      r += `<tr class="row" data-id="${p.id}"><td class="pos ${i===0?"p1":""}">${i+1}</td>
+        <td><span class="dot" style="background:${colour(p.id)}"></span>${esc(p.name)}</td>
+        <td class="num">${fmtTime(p.start)}</td><td class="num">${fmtTime(p.finish)}</td>
+        <td class="num"><b>${fmtDur(p.elapsedSeconds)}</b></td></tr>`;
+    });
+    r += `</tbody></table>`;
+  }
+  const still = racing.length + out.length;
+  if (finished.length && still) r += `<div class="note">${racing.length} pair${racing.length===1?"":"s"} still racing${out.length?`, ${out.length} withdrawn`:""}.</div>`;
+  r += `<div class="note">Times are from GPS updates and may be up to a minute out. Official results are confirmed by the organisers at the finish.</div>`;
+  document.getElementById("results").innerHTML = r;
+
+  document.querySelectorAll("tr.row").forEach(tr => tr.onclick = () => {
+    const p = latest.pairs.find(x => x.id === +tr.dataset.id);
+    if (p && p.lat != null) { map.setView([p.lat, p.lng], 13); layers[p.id].marker.openTooltip(); if (innerWidth < 860) scrollTo({top: 0, behavior: "smooth"}); }
+  });
+}
+
+function row(pos, p, right) {
+  const seen = p.status === "racing" || p.status === "waiting"
+    ? `<span class="sub ${p.stale ? "stale" : ""}">${p.stale ? "⚠ " : ""}last update ${ago(p.lastSeen)}</span>` : (p.note ? `<span class="sub">${esc(p.note)}</span>` : "");
+  return `<tr class="row" data-id="${p.id}"><td class="pos ${pos===1?"p1":""}">${pos}</td>
+    <td><span class="dot" style="background:${colour(p.id)}"></span>${esc(p.name)}${seen}</td>
+    <td class="num">${right}</td></tr>`;
+}
+
+document.querySelectorAll(".tabs button").forEach(b => b.onclick = () => {
+  document.querySelectorAll(".tabs button").forEach(x => x.classList.toggle("on", x === b));
+  document.getElementById("live").hidden = b.dataset.tab !== "live";
+  document.getElementById("results").hidden = b.dataset.tab !== "results";
+});
+
+async function refresh() {
+  try {
+    const res = await fetch("data.json", { cache: "no-store" });
+    if (!res.ok) throw new Error(res.status);
+    render(await res.json());
+  } catch (e) {
+    document.getElementById("clock").textContent = "Connection lost – retrying…";
+  }
+}
+refresh();
+setInterval(refresh, 15000);
+setInterval(() => latest && render(latest), 60000); // keep "x min ago" fresh
+</script>
+</body>
+</html>
