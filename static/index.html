@@ -89,7 +89,7 @@ const fmtDur = sec => {
   return `${h}:${String(m).padStart(2,"0")}:${String(s).padStart(2,"0")}`;
 };
 const ago = s => {
-  if (!s) return "no signal yet";
+  if (!s) return latest && latest.started === false ? "waiting for the start" : "no signal yet";
   // measured against the (possibly delayed) "as of" time so a privacy delay doesn't look like signal loss
   const ref = latest && latest.asOf ? new Date(latest.asOf).getTime() + (Date.now() - new Date(latest.generated).getTime()) : Date.now();
   const m = Math.max(0, Math.round((ref - new Date(s)) / 60000));
@@ -120,9 +120,12 @@ function render(d) {
   if (!finishLayer) {
     finishLayer = (drawArea(d.finish.area, { color: "#0b6e4f", weight: 2, fillOpacity: .15 })
       || L.circleMarker([d.finish.lat, d.finish.lng], { radius: 9, color: "#0b6e4f", fillOpacity: .8 }))
-      .bindTooltip("Finish – University of Bath", { permanent: false }).addTo(map);
+      .bindTooltip("Finish", { permanent: false }).addTo(map);
     L.marker([d.finish.lat, d.finish.lng], { icon: L.divIcon({ className: "", iconSize: null,
-      html: `<div class="flag">🏁 Campus</div>` }), interactive: false, zIndexOffset: -1000 }).addTo(map);
+      html: `<div class="flag">🏁 Finish</div>` }), interactive: false, zIndexOffset: -1000 }).addTo(map);
+  }
+  // the drop-off is only included in the feed once the race has started
+  if (!startLayer && d.startArea) {
     startLayer = drawArea(d.startArea, { color: "#555", weight: 1, dashArray: "4 4", fillOpacity: .05 });
     if (startLayer) startLayer.bindTooltip("Drop-off").addTo(map);
   }
@@ -202,8 +205,12 @@ function render(d) {
 }
 
 function row(pos, p, right) {
-  const seen = p.status === "racing" || p.status === "waiting"
-    ? `<span class="sub ${p.stale ? "stale" : ""}">${p.stale ? "⚠ " : ""}last update ${ago(p.lastSeen)}</span>` : (p.note ? `<span class="sub">${esc(p.note)}</span>` : "");
+  let seen = p.status === "racing" || p.status === "waiting"
+    ? `<span class="sub ${p.stale ? "stale" : ""}">${p.stale ? "⚠ " : ""}${p.lastSeen ? "last update " : ""}${ago(p.lastSeen)}</span>` : (p.note ? `<span class="sub">${esc(p.note)}</span>` : "");
+  if (latest && latest.started === false) {           // no standings before the start
+    pos = "";
+    if (p.lastSeen && !p.stale) seen = `<span class="sub">at the drop-off</span>`;
+  }
   return `<tr class="row" data-id="${p.id}"><td class="pos ${pos===1?"p1":""}">${pos}</td>
     <td><span class="dot" style="background:${colour(p.id)}"></span>${esc(p.name)}${seen}</td>
     <td class="num">${right}</td></tr>`;
