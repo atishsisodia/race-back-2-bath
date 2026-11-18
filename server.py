@@ -46,6 +46,7 @@ DELAY_MINUTES = float(env("DELAY_MINUTES", "0"))     # privacy delay for spectat
 POLL_SECONDS = float(env("POLL_SECONDS", "15"))
 STALE_MINUTES = float(env("STALE_MINUTES", "10"))    # "no signal" after this long
 TRAIL_MIN_METRES = float(env("TRAIL_MIN_METRES", "150"))
+PRE_START_HOURS = float(env("PRE_START_HOURS", "4"))  # how early pairs may reach the drop-off
 
 HOST = env("HOST", "127.0.0.1")
 PORT = int(env("PORT", "8090"))
@@ -141,7 +142,7 @@ class Tracker:
 
     def window_start(self, now):
         if RACE_START:
-            return parse_time(RACE_START) - timedelta(hours=1)
+            return parse_time(RACE_START) - timedelta(hours=PRE_START_HOURS)
         return now - timedelta(hours=24)
 
     def load_overrides(self):
@@ -197,16 +198,19 @@ class Tracker:
         start_gf = gf_by_name.get(START_GEOFENCE.strip().lower())
         finish_gf = gf_by_name.get(FINISH_GEOFENCE.strip().lower())
         finish_geo = parse_area(finish_gf["area"]) if finish_gf else None
-        start_geo = parse_area(start_gf["area"]) if start_gf else None
+        started = race_start is None or cutoff >= race_start
         flat, flng = area_centre(finish_geo) or (FINISH_LAT, FINISH_LNG)
 
         # earliest relevant geofence events per device (only those visible after delay)
-        starts, finishes = {}, {}
+        starts, finishes, arrivals = {}, {}, {}
         for e in events:
             t = parse_time(e.get("eventTime"))
             if not t or t > cutoff:
                 continue
             dev, gid = e.get("deviceId"), e.get("geofenceId")
+            if start_gf and gid == start_gf["id"] and e["type"] == "geofenceEnter":
+                if dev not in arrivals or t < arrivals[dev]:
+                    arrivals[dev] = t
             if start_gf and gid == start_gf["id"] and e["type"] == "geofenceExit":
                 if race_start is None or t >= race_start - timedelta(minutes=5):
                     if dev not in starts or t < starts[dev]:
@@ -214,13 +218,28 @@ class Tracker:
             if finish_gf and gid == finish_gf["id"] and e["type"] == "geofenceEnter":
                 finishes.setdefault(dev, []).append(t)
 
+        # Keep the drop-off secret while pairs are being driven there. Each pair's
+        # position is revealed once they enter the Start geofence, or at the race
+        # start time as a backup if that never registers. All of this is judged on
+        # the spectator clock (after any privacy delay).
+        def reveal_from(did):
+            if race_start is None:
+                return None
+            arrived = arrivals.get(did)
+            return min(arrived, race_start) if arrived else race_start
+
+        any_revealed = started or any(t <= cutoff for t in arrivals.values())
+        start_geo = parse_area(start_gf["area"]) if (start_gf and any_revealed) else None
+
         pairs = []
         for d in devices:
             did = d["id"]
             ov = overrides.get(d.get("name")) or overrides.get(d.get("uniqueId")) or {}
+            shown_from = reveal_from(did)
             pts = sorted(
                 (p for p in self.positions.get(did, {}).values()
-                 if p.get("valid", True) and parse_time(p["fixTime"]) <= cutoff),
+                 if p.get("valid", True) and parse_time(p["fixTime"]) <= cutoff
+                 and (shown_from is None or parse_time(p["fixTime"]) >= shown_from)),
                 key=lambda p: p["fixTime"])
 
             # trail, thinned so the page stays light
@@ -245,7 +264,7 @@ class Tracker:
 
             status = (ov.get("status") or "").lower()
             if status not in ("withdrawn", "dnf"):
-                status = "finished" if finish else ("racing" if cur else "waiting")
+                status = "finished" if finish else ("racing" if (cur and started) else "waiting")
 
             # "Last heard from": the newer of the last position fix and the last time
             # Traccar heard from the phone at all. A phone sitting still may keep
@@ -283,6 +302,7 @@ class Tracker:
             "raceStart": iso(race_start),
             "finish": {"lat": flat, "lng": flng, "area": finish_geo},
             "startArea": start_geo,
+            "started": started,
             "pairs": pairs,
             "warnings": [w for w in [
                 None if finish_gf else f'No geofence named "{FINISH_GEOFENCE}" found - finish times will not be detected.',
@@ -345,3 +365,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
